@@ -1,0 +1,606 @@
+---
+title: "Multivariable model to predict PONV after cesarean"
+author: "Gabriel M N Guimaraes e Helga B G Silva"
+date: "17 de novembro de 2018"
+output:
+  word_document: default
+  html_document: default
+---
+
+<style type="text/css">
+
+body, td {
+   font-size: 12px;
+}
+code.r{
+  font-size: ;12px;
+}
+pre {
+  font-size: 12px
+}
+</style>
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library("kableExtra") #For better looking tables
+```
+
+```{r,warning=FALSE,error=FALSE}
+library("bnlearn")
+library(openxlsx)
+library(BayesFactor)
+library(e1071)
+library(pROC)
+library(ResourceSelection)
+read.xlsx2 = function(bdata){
+  bdata=read.xlsx(bdata)
+  nv=length(bdata)
+  ischar=rep(FALSE,nv)
+  for(i in c(1:nv)){
+    if(is.character(bdata[,i][0])){
+      bdata[,i]=factor(bdata[,i])
+    }
+  }
+  bdata
+}
+sm = function (var,group){
+  print("Summary statistics for ")
+print("Median (min - max)")
+print(paste(round(median(var),2),"(",round(min(var),2),"-",round(max(var),2),")"))
+print("Mean(sd)")
+print(paste(round(mean(var),2),"(",round(sd(var),2),")"))
+}
+
+TwoByTwoBFc = function (x,y){
+    a=sum(x & y)
+    b=sum(x & !y)
+    c=sum(!x & y)
+    d=sum(!x & !y)
+    table=as.matrix(data.frame(yes=c(a,c),no=c(b,d)))
+    bf=extractBF(contingencyTableBF(table, sampleType = "indepMulti", fixedMargin = "cols"))[1]$bf
+    bf
+  }
+```
+
+# Load train and test data sets
+
+```{r,warning=FALSE,error=FALSE,error=FALSE}
+traini=read.xlsx2("D:\\Doutorado Gabriel\\train.xlsx")
+testi=read.xlsx2("D:\\Doutorado Gabriel\\test.xlsx")
+train=droplevels(subset(traini,traini$excluded==FALSE))
+test=droplevels(subset(testi,testi$excluded==FALSE))
+
+
+
+train$younger=train$age<25
+train$morphine.get.80=train$morphine>79
+train$neversmoked=train$smoking=="5.never.smoked"
+train$preterm=train$gestational.age<38
+train$previous.surgery.and.ponv=train$previous.ponv=="previous.surgery.and.ponv"
+
+test$younger=test$age<25
+test$morphine.get.80=test$morphine>79
+test$neversmoked=test$smoking=="5.never.smoked"
+test$preterm=test$gestational.age<38
+test$previous.surgery.and.ponv=test$previous.ponv=="previous.surgery.and.ponv"
+
+train$apfel=2+(train$previous.surgery.and.ponv | train$cinetosis)+train$neversmoked
+test$apfel=2+(test$previous.surgery.and.ponv | test$cinetosis)+test$neversmoked
+test$apfelp=test$apfel*0.2
+train$apfelp=train$apfel*0.2
+
+```
+
+# Descriptive statistics
+
+## Variables' detailed description
+```{r,warning=FALSE,error=FALSE, echo=FALSE}
+varname=names(train)
+description=c("unique case identifier - HIPAA compatible","TRUE if case was excluded","Reason for exclusion", "Patient Age in Years", "If PONV after previous surgery","Gestational duration in weeks", "TRUE if patient refers cinetosis", "Cathegorical smoking status from never smoked to smokes", "If patient refers significant nausea during the first gestational trimester","If patient refers significant nausea during the third gestational trimester","Mean arterial pressure before spinal anesthesia in mmHg","Anesthesia technique - spinal or other", "Heavy Bupivacaine spinal dose in mg", "Spinal sufentanil in mcg","Spinal fentanyl in mcg","Spinal Morphine in mcg", "If the patient experienced nausea during the cesarean","If the patient experienced vomiting during the cesarean","lower measured intraoperative MAP in mmHg","If the patient received intravenous ephedrine and if it was rescue or not","If the patient experienced nausea in the PACU","If the patient vomited in the PACU","Nausea intensity in PACU", "Number of vomiting episodes in PACU","If the patient experienced nausea 2 to 24h after cesarean", "Maximum nausea intensity 2-24h","If the patient vomited 2-24h after cesarean", "Number of vomiting Episodes 2-24h after cesarean","Absolute MAP drop after spinal anesthesia", "(Basal MAP-lower MAP)/Basal MAP", "Either nausea or vomiting from PACU to 24h after cesarean - not IONV", "Nausea or vomiting during the cesarean","Patients <25 years","Spinal Morphine >79mcg", "Patients who never smoked","Gestational weeks <38" ,"Patients who had a previous surgery and vomited","Number of Apfel's PONV risk factors")
+
+#x_html <- knitr::kable(data.frame(varname,description), "html")
+#kable_styling(kable_input = x_html, "striped", full_width = FALSE)
+x_html <- knitr::kable(data.frame(varname,description), "pandoc")
+kable_styling(kable_input = x_html, "striped", full_width = FALSE)
+```
+
+
+## Development and test samples
+
+```{r,warning=FALSE,error=FALSE}
+tsis=length(traini$id)
+tsfs=length(train$id)
+
+ttsis=length(testi$id)
+ttsfs=length(test$id)
+
+print("Summary")
+
+print(paste("Train sample initial size",tsis,"Train sample final size=",tsfs,"Excluded=",tsis-tsfs,"Proportion excluded=",(tsis-tsfs)/tsis))
+
+print(paste("Test sample initial size",ttsis,"Test sample final size=",ttsfs,"Excluded=",ttsis-ttsfs,"Proportion excluded=",(ttsis-ttsfs)/ttsis))
+
+```
+
+## Variables description
+## Numerical variables
+
+```{r,warning=FALSE,error=FALSE}
+
+meanstrain=c(mean(train$age),mean(train$gestational.age),mean(train$map.basal),mean(train$bupivacaine),mean(train$sufentanil),mean(train$fentanyl),mean(train$morphine),mean(train$lower.intraoperative.map),mean(train$pacu.nausea.intensity),mean(train$pacu.vomiting.number),mean(train$maximum.nausea.intensity,na.rm=TRUE),mean(train$vomiting.number.2.24h),mean(train$map.drop),mean(train$map.drop.proportion))
+
+meanstest=c(mean(test$age),mean(test$gestational.age),mean(test$map.basal),mean(test$bupivacaine),mean(test$sufentanil),mean(test$fentanyl),mean(test$morphine),mean(test$lower.intraoperative.map),mean(test$pacu.nausea.intensity),mean(test$pacu.vomiting.number),mean(test$maximum.nausea.intensity,na.rm=TRUE),mean(test$vomiting.number.2.24h),mean(test$map.drop),mean(test$map.drop.proportion))
+
+sdstrain=c(sd(train$age),sd(train$gestational.age),sd(train$map.basal),sd(train$bupivacaine),sd(train$sufentanil),sd(train$fentanyl),sd(train$morphine),sd(train$lower.intraoperative.map),sd(train$pacu.nausea.intensity),sd(train$pacu.vomiting.number),sd(train$maximum.nausea.intensity,na.rm=TRUE),sd(train$vomiting.number.2.24h),sd(train$map.drop),sd(train$map.drop.proportion))
+
+sdstest=c(sd(test$age),sd(test$gestational.age),sd(test$map.basal),sd(test$bupivacaine),sd(test$sufentanil),sd(test$fentanyl),sd(test$morphine),sd(test$lower.intraoperative.map),sd(test$pacu.nausea.intensity),sd(test$pacu.vomiting.number),sd(test$maximum.nausea.intensity),sd(test$vomiting.number.2.24h),sd(test$map.drop),sd(test$map.drop.proportion))
+
+
+shapirotrain=c(unname(shapiro.test(train$age)[2]$`p.value`),shapiro.test(train$gestational.age)[2]$`p.value`,shapiro.test(train$map.basal)[2]$`p.value`,shapiro.test(train$bupivacaine)[2]$`p.value`,shapiro.test(train$sufentanil)[2]$`p.value`,shapiro.test(train$fentanyl)[2]$`p.value`,shapiro.test(train$morphine)[2]$`p.value`,shapiro.test(train$lower.intraoperative.map)[2]$`p.value`,shapiro.test(train$pacu.nausea.intensity)[2]$`p.value`,shapiro.test(train$pacu.vomiting.number)[2]$`p.value`,shapiro.test(train$maximum.nausea.intensity)[2]$`p.value`,shapiro.test(train$vomiting.number.2.24h)[2]$`p.value`,shapiro.test(train$map.drop)[2]$`p.value`,shapiro.test(train$map.drop.proportion)[2]$`p.value`)
+
+shapirotest=c(shapiro.test(test$age)[2]$`p.value`,shapiro.test(test$gestational.age)[2]$`p.value`,shapiro.test(test$map.basal)[2]$`p.value`,shapiro.test(test$bupivacaine)[2]$`p.value`,shapiro.test(test$sufentanil)[2]$`p.value`,shapiro.test(test$fentanyl)[2]$`p.value`,shapiro.test(test$morphine)[2]$`p.value`,shapiro.test(test$lower.intraoperative.map)[2]$`p.value`,shapiro.test(test$pacu.nausea.intensity)[2]$`p.value`,shapiro.test(test$pacu.vomiting.number)[2]$`p.value`,shapiro.test(test$maximum.nausea.intensity)[2]$`p.value`,shapiro.test(test$vomiting.number.2.24h)[2]$`p.value`,shapiro.test(test$map.drop)[2]$`p.value`,shapiro.test(test$map.drop.proportion)[2]$`p.value`)
+
+wilcoxtest=c(wilcox.test(train$age,test$age)[3]$`p.value`,wilcox.test(train$gestational.age,test$gestational.age)[3]$`p.value`,wilcox.test(train$map.basal,test$map.basal)[3]$`p.value`,wilcox.test(train$bupivacaine,test$bupivacaine)[3]$`p.value`,wilcox.test(train$sufentanil,test$sufentanil)[3]$`p.value`,wilcox.test(train$fentanyl,test$fentanyl)[3]$`p.value`,wilcox.test(train$morphine,test$morphine)[3]$`p.value`,wilcox.test(train$lower.intraoperative.map,test$lower.intraoperative.map)[3]$`p.value`,wilcox.test(train$pacu.nausea.intensity,test$pacu.nausea.intensity)[3]$`p.value`,wilcox.test(train$pacu.vomiting.number,test$pacu.vomiting.number)[3]$`p.value`,wilcox.test(train$maximum.nausea.intensity,test$maximum.nausea.intensity)[3]$`p.value`,wilcox.test(train$vomiting.number.2.24h,test$vomiting.number.2.24h)[3]$`p.value`,wilcox.test(train$map.drop,test$map.drop)[3]$`p.value`,wilcox.test(train$map.drop.proportion,test$map.drop.proportion)[3]$`p.value`)
+
+
+parametric=data.frame(Train.mean=round(meanstrain,digits=2),Train.sd=round(sdstrain,digits=2),Train.Shapiro=shapirotrain,Test.mean=round(meanstest,digits=2),Test.sd=round(sdstest,digits=2))
+
+mediantrain=c(median(train$age),median(train$gestational.age),median(train$map.basal),median(train$bupivacaine),median(train$sufentanil),median(train$fentanyl),median(train$morphine),median(train$lower.intraoperative.map),median(train$pacu.nausea.intensity),median(train$pacu.vomiting.number),median(train$maximum.nausea.intensity,na.rm=TRUE),median(train$vomiting.number.2.24h),median(train$map.drop),median(train$map.drop.proportion))
+
+mediantest=c(median(test$age),median(test$gestational.age),median(test$map.basal),median(test$bupivacaine),median(test$sufentanil),median(test$fentanyl),median(test$morphine),median(test$lower.intraoperative.map),median(test$pacu.nausea.intensity),median(test$pacu.vomiting.number),median(test$maximum.nausea.intensity,na.rm=TRUE),median(test$vomiting.number.2.24h),median(test$map.drop),median(test$map.drop.proportion))
+
+mintrain=c(min(train$age),min(train$gestational.age),min(train$map.basal),min(train$bupivacaine),min(train$sufentanil),min(train$fentanyl),min(train$morphine),min(train$lower.intraoperative.map),min(train$pacu.nausea.intensity),min(train$pacu.vomiting.number),min(train$maximum.nausea.intensity,na.rm=TRUE),min(train$vomiting.number.2.24h),min(train$map.drop),min(train$map.drop.proportion))
+
+mintest=c(min(test$age),min(test$gestational.age),min(test$map.basal),min(test$bupivacaine),min(test$sufentanil),min(test$fentanyl),min(test$morphine),min(test$lower.intraoperative.map),min(test$pacu.nausea.intensity),min(test$pacu.vomiting.number),min(test$maximum.nausea.intensity,na.rm=TRUE),min(test$vomiting.number.2.24h),min(test$map.drop),min(test$map.drop.proportion))
+
+maxtrain=c(max(train$age),max(train$gestational.age),max(train$map.basal),max(train$bupivacaine),max(train$sufentanil),max(train$fentanyl),max(train$morphine),max(train$lower.intraoperative.map),max(train$pacu.nausea.intensity),max(train$pacu.vomiting.number),max(train$maximum.nausea.intensity,na.rm=TRUE),max(train$vomiting.number.2.24h),max(train$map.drop),max(train$map.drop.proportion))
+
+maxtest=c(max(test$age),max(test$gestational.age),max(test$map.basal),max(test$bupivacaine),max(test$sufentanil),max(test$fentanyl),max(test$morphine),max(test$lower.intraoperative.map),max(test$pacu.nausea.intensity),max(test$pacu.vomiting.number),max(test$maximum.nausea.intensity,na.rm=TRUE),max(test$vomiting.number.2.24h),max(test$map.drop),max(test$map.drop.proportion))
+
+IQRtrain=c(IQR(train$age),IQR(train$gestational.age),IQR(train$map.basal),IQR(train$bupivacaine),IQR(train$sufentanil),IQR(train$fentanyl),IQR(train$morphine),IQR(train$lower.intraoperative.map),IQR(train$pacu.nausea.intensity),IQR(train$pacu.vomiting.number),IQR(train$maximum.nausea.intensity,na.rm=TRUE),IQR(train$vomiting.number.2.24h),IQR(train$map.drop),IQR(train$map.drop.proportion))
+
+IQRtest=c(IQR(test$age),IQR(test$gestational.age),IQR(test$map.basal),IQR(test$bupivacaine),IQR(test$sufentanil),IQR(test$fentanyl),IQR(test$morphine),IQR(test$lower.intraoperative.map),IQR(test$pacu.nausea.intensity),IQR(test$pacu.vomiting.number),IQR(test$maximum.nausea.intensity,na.rm=TRUE),IQR(test$vomiting.number.2.24h),IQR(test$map.drop),IQR(test$map.drop.proportion))
+
+
+non.parametric=data.frame(Train.median=round(mediantrain,digits=1),Train.min=round(mintrain,digits=1),Train.max=round(maxtrain,digits=1),Train.iqr=round(IQRtrain,digits=1),Test.median=round(mediantest,digits=1),Test.min=round(mintest,digits=1),Test.max=round(maxtest,digits=1),Test.iqr=round(IQRtest,digits=1))
+
+row.names(parametric)=c("age","gestational.age","map.basal","bupivacaine","sufentanil","fentanyl","morphine","lower.intraoperative.map","pacu.nausea.intensity","pacu.vomiting.number","maximum.nausea.intensity","vomiting.number.2.24h","map.drop","map.drop.proportion")
+row.names(non.parametric)=c("age","gestational.age","map.basal","bupivacaine","sufentanil","fentanyl","morphine","lower.intraoperative.map","pacu.nausea.intensity","pacu.vomiting.number","maximum.nausea.intensity","vomiting.number.2.24h","map.drop","map.drop.proportion")
+
+#x_htmlnp <- knitr::kable(non.parametric, "html")
+#x_htmlp <- knitr::kable(parametric, "html")
+
+x_htmlnp <- knitr::kable(non.parametric, "pandoc")
+x_htmlp <- knitr::kable(parametric, "pandoc")
+
+#kable_styling(kable_input = x_htmlp, "striped")
+
+#kable_styling(kable_input = x_htmlnp, "striped")
+
+```
+```{r,warning=FALSE,error=FALSE,echo=FALSE}
+kable_styling(kable_input = x_htmlp, "striped", full_width = FALSE)
+
+kable_styling(kable_input = x_htmlnp, "striped", full_width = FALSE)
+
+```
+
+
+## Categorical variables
+
+```{r,warning=FALSE,error=FALSE}
+presenttrain=c(sum(train$cinetosis),sum(train$nausea1trim),sum(train$nausea3trim),sum(train$ionv),sum(train$younger),sum(train$preterm),sum(train$neversmoked))
+totalTrain=c(length(train$cinetosis),length(train$nausea1trim),length(train$nausea3trim),length(train$ionv),length(train$younger),length(train$preterm),length(train$neversmoked))
+absentTrain=totalTrain-presenttrain
+proportionPresentTrain=presenttrain/totalTrain
+
+presenttest=presenttest=c(sum(test$cinetosis),sum(test$nausea1trim),sum(test$nausea3trim),sum(test$ionv),sum(test$younger),sum(test$preterm),sum(test$neversmoked))
+
+totaltest=c(length(test$cinetosis),length(test$nausea1trim),length(test$nausea3trim),length(test$ionv),length(test$younger),length(test$preterm),length(test$neversmoked))
+absenttest=totaltest-presenttest
+proportionPresenttest=presenttest/totaltest
+
+train$sample=rep("train",length(train$id))
+test$sample=rep("test",length(test$id))
+db=rbind(train,test)
+
+pvaluelist2=c(fisher.test(db$cinetosis,db$sample)[1]$`p.value`,fisher.test(db$nausea1trim,db$sample)[1]$`p.value`,fisher.test(db$nausea3trim,db$sample)[1]$`p.value`,fisher.test(db$ionv,db$sample)[1]$`p.value`,fisher.test(db$younger,db$sample)[1]$`p.value`,fisher.test(db$preterm,db$sample)[1]$`p.value`,fisher.test(db$neversmoked,db$sample)[1]$`p.value`)
+
+dichotomic=data.frame(yes.train=presenttrain,no.train=absentTrain,prop=proportionPresentTrain,yes.test=presenttest,no.test=absenttest,prop.test=proportionPresenttest,p.value=pvaluelist2)
+
+row.names(dichotomic)=c("Cinetosis","Nausea 1 Trimester","Nausea 3 Trimester","Intraop.Nausea","Age<25","Gest<38w","Never.smoked")
+#x_html <- knitr::kable(dichotomic, "html")
+x_html <- knitr::kable(dichotomic, "pandoc")
+kable_styling(kable_input = x_html, "striped", full_width = FALSE)
+
+table(db$sample,db$previous.ponv)
+
+table(db$sample,db$smoking)
+
+table(db$sample,db$received.ephedrine)
+
+```
+
+
+## Risk factors for PONV (Training set)
+
+### Dichotomic risk factos analysis
+
+```{r,warning=FALSE,error=FALSE}
+presentandponv=c(sum(train$cinetosis & train$ponv),sum(train$nausea1trim & train$ponv),sum(train$nausea3trim & train$ponv),sum(train$ionv & train$ponv),sum(train$younger & train$ponv),sum(train$preterm & train$ponv),sum(train$neversmoked))
+
+presentnoponv=c(sum(train$cinetosis & !train$ponv),sum(train$nausea1trim & !train$ponv),sum(train$nausea3trim & !train$ponv),sum(train$ionv & !train$ponv),sum(train$younger & !train$ponv),sum(train$preterm & !train$ponv),sum(train$neversmoked))
+
+absentandponv=c(sum(!train$cinetosis & train$ponv),sum(!train$nausea1trim & train$ponv),sum(!train$nausea3trim & train$ponv),sum(!train$ionv & train$ponv),sum(!train$younger & train$ponv),sum(!train$preterm & train$ponv),sum(!train$neversmoked))
+
+absentandnoponv=c(sum(!train$cinetosis & !train$ponv),sum(!train$nausea1trim & !train$ponv),sum(!train$nausea3trim & !train$ponv),sum(!train$ionv & !train$ponv),sum(!train$younger & !train$ponv),sum(!train$preterm & !train$ponv),sum(!train$neversmoked))
+
+totalTrain=c(length(train$cinetosis),length(train$nausea1trim),length(train$nausea3trim),length(train$ionv),length(train$younger),length(train$preterm),length(train$neversmoked))
+
+risk=presentandponv/(presentandponv+presentnoponv)
+norisk=absentandponv/(absentandponv+absentandnoponv)
+rr=risk/norisk
+
+presenttest=presenttest=c(sum(test$cinetosis),sum(test$nausea1trim),sum(test$nausea3trim),sum(test$ionv),sum(test$younger),sum(test$preterm),sum(test$neversmoked))
+
+totaltest=c(length(test$cinetosis),length(test$nausea1trim),length(test$nausea3trim),length(test$ionv),length(test$younger),length(test$preterm),length(test$neversmoked))
+absenttest=totaltest-presenttest
+proportionPresenttest=presenttest/totaltest
+
+
+pvaluelist3=c(fisher.test(train$cinetosis,train$ponv)[1]$`p.value`,fisher.test(train$nausea1trim,train$ponv)[1]$`p.value`,fisher.test(train$nausea3trim,train$ponv)[1]$`p.value`,fisher.test(train$ionv,train$ponv)[1]$`p.value`,fisher.test(train$younger,train$ponv)[1]$`p.value`,fisher.test(train$preterm,train$ponv)[1]$`p.value`,fisher.test(train$neversmoked,train$ponv)[1]$`p.value`)
+
+bflist1=c(TwoByTwoBFc(train$cinetosis,train$ponv),TwoByTwoBFc(train$nausea1trim,train$ponv),TwoByTwoBFc(train$nausea3trim,train$ponv),TwoByTwoBFc(train$ionv,train$ponv),TwoByTwoBFc(train$younger,train$ponv),TwoByTwoBFc(train$preterm,train$ponv),TwoByTwoBFc(train$neversmoked,train$ponv))
+
+
+odds=c(unname(fisher.test(train$cinetosis,train$ponv)[3]$`estimate`),unname(fisher.test(train$nausea1trim,train$ponv)[3]$`estimate`),unname(fisher.test(train$nausea3trim,train$ponv)[3]$`estimate`),unname(fisher.test(train$ionv,train$ponv)[3]$`estimate`),unname(fisher.test(train$younger,train$ponv)[3]$`estimate`),unname(fisher.test(train$preterm,train$ponv)[3]$`estimate`),unname(fisher.test(train$neversmoked,train$ponv)[3]$`estimate`))
+
+odds_ll=c(fisher.test(train$cinetosis,train$ponv)[2]$`conf.int`[1],fisher.test(train$nausea1trim,train$ponv)[2]$`conf.int`[1],fisher.test(train$nausea3trim,train$ponv)[2]$`conf.int`[1],fisher.test(train$ionv,train$ponv)[2]$`conf.int`[1],fisher.test(train$younger,train$ponv)[2]$`conf.int`[1],fisher.test(train$preterm,train$ponv)[2]$`conf.int`[1],fisher.test(train$neversmoked,train$ponv)[2]$`conf.int`[1])
+odds_ul=c(fisher.test(train$cinetosis,train$ponv)[2]$`conf.int`[2],fisher.test(train$nausea1trim,train$ponv)[2]$`conf.int`[2],fisher.test(train$nausea3trim,train$ponv)[2]$`conf.int`[2],fisher.test(train$ionv,train$ponv)[2]$`conf.int`[2],fisher.test(train$younger,train$ponv)[2]$`conf.int`[2],fisher.test(train$preterm,train$ponv)[2]$`conf.int`[2],fisher.test(train$neversmoked,train$ponv)[2]$`conf.int`[2])
+
+odds=round(odds,digits=2)
+odds_ll=round(odds_ll,digits=2)
+odds_ul=round(odds_ul,digits=2)
+rr=round(rr,digits=2)
+risk=round(risk,digits=2)
+
+odds2=paste(odds,"(",odds_ll,"-",odds_ul,")")
+
+dichotomic=data.frame(ponv=presentandponv,noponv=presentnoponv,p.ponv=risk,RR=rr, odds.95percent.CI=odds2,p.value=pvaluelist3,BF=bflist1)
+
+row.names(dichotomic)=c("Cinetosis","Nausea 1 Trimester","Nausea 3 Trimester","Intraop.Nausea","Age<25","Gest<38w","Never.smoked")
+
+
+#x_html <- knitr::kable(dichotomic, "html")
+x_html <- knitr::kable(dichotomic, "pandoc")
+kable_styling(kable_input = x_html, "striped", full_width = FALSE)
+
+```
+
+### Numerical risk factors analysis
+
+```{r,warning=FALSE,error=FALSE}
+meanstrainponv=c(mean(train$age[train$ponv==TRUE]),mean(train$gestational.age[train$ponv==TRUE]),mean(train$map.basal[train$ponv==TRUE]),mean(train$bupivacaine[train$ponv==TRUE]),mean(train$sufentanil[train$ponv==TRUE]),mean(train$fentanyl[train$ponv==TRUE]),mean(train$morphine[train$ponv==TRUE]),mean(train$lower.intraoperative.map[train$ponv==TRUE]),mean(train$map.drop[train$ponv==TRUE]),mean(train$map.drop.proportion[train$ponv==TRUE]))
+
+meanstrainnoponv=c(mean(train$age[train$ponv==FALSE]),mean(train$gestational.age[train$ponv==FALSE]),mean(train$map.basal[train$ponv==FALSE]),mean(train$bupivacaine[train$ponv==FALSE]),mean(train$sufentanil[train$ponv==FALSE]),mean(train$fentanyl[train$ponv==FALSE]),mean(train$morphine[train$ponv==FALSE]),mean(train$lower.intraoperative.map[train$ponv==FALSE]),mean(train$map.drop[train$ponv==FALSE]),mean(train$map.drop.proportion[train$ponv==FALSE]))
+
+sdtrainponv=meanstrain=c(sd(train$age[train$ponv==TRUE]),sd(train$gestational.age[train$ponv==TRUE]),sd(train$map.basal[train$ponv==TRUE]),sd(train$bupivacaine[train$ponv==TRUE]),sd(train$sufentanil[train$ponv==TRUE]),sd(train$fentanyl[train$ponv==TRUE]),sd(train$morphine[train$ponv==TRUE]),sd(train$lower.intraoperative.map[train$ponv==TRUE]),sd(train$map.drop[train$ponv==TRUE]),sd(train$map.drop.proportion[train$ponv==TRUE]))
+
+sdtrainnoponv=c(sd(train$age[train$ponv==FALSE]),sd(train$gestational.age[train$ponv==FALSE]),sd(train$map.basal[train$ponv==FALSE]),sd(train$bupivacaine[train$ponv==FALSE]),sd(train$sufentanil[train$ponv==FALSE]),sd(train$fentanyl[train$ponv==FALSE]),sd(train$morphine[train$ponv==FALSE]),sd(train$lower.intraoperative.map[train$ponv==FALSE]),sd(train$map.drop[train$ponv==FALSE]),sd(train$map.drop.proportion[train$ponv==FALSE]))
+
+plist5=c(wilcox.test(train$age~train$ponv)[3]$`p.value`,wilcox.test(train$gestational.age~train$ponv)[3]$`p.value`,wilcox.test(train$map.basal~train$ponv)[3]$`p.value`,wilcox.test(train$bupivacaine~train$ponv)[3]$`p.value`,wilcox.test(train$sufentanil~train$ponv)[3]$`p.value`,wilcox.test(train$fentanyl~train$ponv)[3]$`p.value`,wilcox.test(train$morphine~train$ponv)[3]$`p.value`,wilcox.test(train$lower.intraoperative.map~train$ponv)[3]$`p.value`,wilcox.test(train$map.drop~train$ponv)[3]$`p.value`,wilcox.test(train$map.drop.proportion~train$ponv)[3]$`p.value`)
+
+bfnum=c(extractBF(ttestBF(train$age,train$ponv))$bf,extractBF(ttestBF(train$gestational.age,train$ponv))$bf,extractBF(ttestBF(train$map.basal,train$ponv))$bf,extractBF(ttestBF(train$bupivacaine,train$ponv))$bf,extractBF(ttestBF(train$sufentanil,train$ponv))$bf,extractBF(ttestBF(train$fentanyl,train$ponv))$bf,extractBF(ttestBF(train$morphine,train$ponv))$bf,extractBF(ttestBF(train$lower.intraoperative.map,train$ponv))$bf,extractBF(ttestBF(train$map.drop,train$ponv))$bf,extractBF(ttestBF(train$map.drop.proportion,train$ponv))$bf)
+
+
+numerical=data.frame(mean.ponv=meanstrainponv,sd.ponv=sdtrainponv,mean.no.ponv=meanstrainnoponv,sd.no.ponv=sdtrainnoponv,p.value=plist5,BF=bfnum)
+
+row.names(numerical)=c("age","gestational.age","map.basal","bupivacaine","sufentanil","fentanyl","morphine","lower.intraoperative.map","map.drop","map.drop.proportion")
+#x_html <- knitr::kable(numerical, "html")
+x_html <- knitr::kable(numerical, "pandoc")
+kable_styling(kable_input = x_html, "striped", full_width = FALSE)
+
+
+```
+
+## Feature selection (cathegorical)
+
+```{r,warning=FALSE,error=FALSE}
+BayesFactor::contingencyTableBF(table(train$previous.ponv,train$ponv),sampleType = "indepMulti", fixedMargin = "cols")
+BayesFactor::contingencyTableBF(table(train$received.ephedrine,train$ponv),sampleType = "indepMulti", fixedMargin = "cols")
+BayesFactor::contingencyTableBF(table(train$smoking,train$ponv),sampleType = "indepMulti", fixedMargin = "cols")
+```
+
+
+```{r,warning=FALSE,error=FALSE}
+bdbn=data.frame(neversmoked=train$neversmoked,cinetosis=train$cinetosis,nausea1trim=train$nausea1trim, ponv=train$ponv,ionv=train$ionv)
+
+bdbn$younger=as.factor(train$younger)
+bdbn$neversmoked=as.factor(bdbn$neversmoked)
+bdbn$ionv=as.factor(bdbn$ionv)
+bdbn$cinetosis=as.factor(bdbn$cinetosis)
+bdbn$nausea1trim=as.factor(bdbn$nausea1trim)
+bdbn$ponv=as.factor(bdbn$ponv)
+bdbn$preterm=as.factor(train$preterm)
+bdbn$ephedrine=as.factor(train$received.ephedrine)
+bdbn$hypotension=as.factor(train$map.drop.proportion>0.1)
+bdbn$previousponv.and.surgery=as.factor(train$previous.surgery.and.ponv)
+#bdbn
+# Blacklist
+i=1;
+from="";to=""
+n=(length(names(bdbn)))
+## PONV cannot cause any past variable
+for(i in c(1:n)){
+#from[i]="ponv";to[i]=names(bdbn)[i]}
+from[i]=names(bdbn)[i];to[i]="ponv"}
+## Age cannot be caused by any other variable
+for(i in c(1:n)){
+from[i+n]="younger";to[i+n]=names(bdbn)[i]}
+#to[i+n]="younger";from[i+n]=names(bdbn)[i]
+
+
+to[2*n+1]="ephedrine";from[2*n+1]="hypotension"
+to[2*n+2]="ephedrine";from[2*n+2]="neversmoked"
+
+blacklist=data.frame(from=from,to=to)
+
+plot(iamb(bdbn,blacklist=blacklist))
+
+```
+## Step 2
+
+After removing variables excluded by mutual conditional independence
+
+```{r}
+
+bdbn=data.frame(nausea1trim=train$nausea1trim, ponv=train$ponv,ionv=train$ionv,preterm=train$preterm)
+
+bdbn$ionv=as.factor(bdbn$ionv)
+bdbn$preterm=as.factor(bdbn$preterm)
+bdbn$nausea1trim=as.factor(bdbn$nausea1trim)
+bdbn$ponv=as.factor(bdbn$ponv)
+bdbn$ephedrine=as.factor(train$received.ephedrine)
+bdbn$hypotension=as.factor(train$map.drop.proportion>0.1)
+
+# Blacklist - temporal and technical knowledge Helps reducing universe of possible models
+i=1;
+from="";to=""
+n=(length(names(bdbn)))
+## PONV cannot cause any past variable
+for(i in c(1:n)){
+to[i]="ponv";from[i]=names(bdbn)[i]}
+
+from[1+n]="ionv";to[1+n]="ephedrine"
+to[n+2]="ephedrine";from[n+2]="hypotension"
+
+
+
+blacklist=data.frame(from=from,to=to)
+BayesNetwork=iamb(bdbn,blacklist=blacklist)
+plot(BayesNetwork)
+
+```
+
+This Bayesian Network is very similar to a NaïveBayes. For classification purposes, it is identical.
+
+## NaïveBayes classifier
+
+```{r}
+bdbnt=data.frame(ponv=test$ponv)
+
+bdbnt$ionv=as.factor(test$ionv)
+bdbnt$nausea1trim=as.factor(test$nausea1trim)
+bdbnt$ponv=as.factor(test$ponv)
+bdbnt$preterm=as.factor(test$preterm)
+
+
+bdbn=data.frame(ponv=test$ponv)
+
+bdbn$ionv=as.factor(test$ionv)
+bdbn$nausea1trim=as.factor(test$nausea1trim)
+bdbn$ponv=as.factor(test$ponv)
+bdbn$preterm=as.factor(test$preterm)
+
+fitnb <-naiveBayes(ponv ~ ., data=bdbn)
+nb1=naive.bayes(bdbn,"ponv")
+fit=bn.fit(nb1,bdbn)
+pred=predict(fit,bdbnt)
+table(pred,bdbnt$ponv)
+tp=sum(pred ==TRUE & bdbnt$ponv==TRUE)
+tn=sum(pred ==FALSE & bdbnt$ponv==FALSE)
+fp=sum(pred ==TRUE & bdbnt$ponv==FALSE)
+fn=sum(pred ==FALSE & bdbnt$ponv==TRUE)
+
+m2=data.frame(naive.p=(predict(fitnb,bdbnt,type="raw")[,2]),observed=bdbnt$ponv)
+table(m2)
+#m2$naive.p=as.factor(m2$naive.p)
+sensitivity.nb=tp/(tp+fn)
+specificity.nb=tn/(tn+fp)
+
+fitnb
+
+plot.roc(m2$observed,m2$naive.p,percent=TRUE,print.auc=TRUE)
+text(x=30,y=20,labels="ROC for NaïveBayes Classifier")
+rocnb=roc(m2$observed,m2$naive.p)
+ci(roc(m2$observed,m2$naive.p))
+ci(roc(m2$observed,m2$naive.p),of="sp")
+ci(roc(m2$observed,m2$naive.p),of="se")
+score(nb1,bdbnt,type="aic")
+```
+
+## Multiple logistic regression classifier
+
+```{r}
+mlr1=(glm(ponv~age+previous.surgery.and.ponv+cinetosis+nausea1trim+received.ephedrine+ionv+map.drop.proportion,data=train,family="binomial"))
+summary(mlr1)
+plot.roc(test$ponv,unname(predict(mlr1,test)),percent=TRUE,print.auc=TRUE)
+text(x=30,y=20,labels="ROC for Multiple Logistic Regression")
+roclogistic=roc(test$ponv,unname(predict(mlr1,test)))
+ci(roc(test$ponv,unname(predict(mlr1,test))))
+ci(roc(test$ponv,unname(predict(mlr1,test))),of="se")
+ci(roc(test$ponv,unname(predict(mlr1,test))),of="sp")
+table(test$ponv,unname(predict(mlr1,test)>0.5))
+mlr1$aic
+```
+
+## Apfel's heuristic
+```{r}
+# Female sex = all = 1
+# Plan of postoperative opoid (neuraxial?) = same procedure = 1
+# Previous PONV or cinetosis
+# Smoking ... nerver smoked only?
+
+table(train$apfel,train$ponv)
+roc(test$ponv,test$apfelp)
+ci(test$ponv,test$apfelp)
+
+```
+Apfel's model's discrimination: either sensitivity of 42.8% and specificity of 74.1% or sensitivity of 100% and specificity of 12.4%.
+
+# Models comparison and model selection
+
+```{r}
+roc.test(rocnb,roc(test$ponv,test$apfelp),method="delong")
+roc.test(roclogistic,roc(test$ponv,test$apfelp),method="delong")
+roc.test(rocnb,roclogistic,method="delong")
+roc.test(rocnb,roclogistic,method="bootstrap")
+hoslem.test(test$ponv,m2$naive.p)
+hoslem.test(test$ponv,unname(predict(mlr1,test)))
+```
+
+We cannot rule out the null hypothesis for the discrimination power difference between models using either Delong's or bootstrapping methods.
+
+Hosmer-Lemeshow tests high p-values are additional evidence of good model fitness. If p-values < alpha level were obtained, this would be evidence of poor fitness.
+
+## More discrimination comparison
+
+```{r}
+mlrp=unname(predict(mlr1,test))
+modelcomp=data.frame(observed=test$ponv,logistic=mlrp>0.5,naive=m2$naive.p>0.5)
+table(modelcomp)
+modelcomp=data.frame(observed=test$ponv,logistic=mlrp,naive=m2$naive.p)
+
+#Comparisons for 0.5 threshold
+logistic=c(8,15)
+naive=c(10,13)
+
+
+naive=c(69,4)
+logisti=c(73,0)
+
+## Sensitivity
+### Training Sample - 
+kp = 20 #Naive
+np = 49 # total
+klp = 18 # Logistic
+
+kpriori = 10 #Naive
+npriori = 49 # total
+
+### Test Sample
+k = 10+kp #Naive
+n = 23+np # total
+kl = 8+klp # Logistic
+
+## x-axis for plotting
+numSteps = 200
+x = seq(0, 1, 1 / numSteps)
+
+## Likelihood (training) function
+P = x^kp * (1 - x)^(np - kp)
+Pl = x^klp * (1 - x)^(np - klp)
+
+## Likelihood function (test sample)
+L = x^k * (1 - x)^(n - k)
+Ll = x^kl * (1 - x)^(n - kl)
+
+## Normalization
+L = L / sum(L) * numSteps
+Ll = Ll / sum(Ll) * numSteps
+P = P / sum(P) * numSteps
+Pl = Pl / sum(Pl) * numSteps
+
+## Plot prior sensitivity = prevalence = 0.2
+plot(x, dbeta(x,4,20), type="l",lty = 3, lwd = 3, col = "blue",ylim = c(0,8),
+     main = "Sensitivity calibration for each model",
+     xlab = expression(theta), ylab = "pdf")
+
+## Plot Training
+lines(x, P, type="l",lty = 1, lwd = 3, col = "green")
+lines(x, Pl, type="l",lty = 1, lwd = 3, col = "pink")
+
+## Plot Likelihood
+
+lines(x, L, type = 'l', lwd = 3,col="yellow")
+lines(x, Ll, type = 'l', lwd = 3,col="grey")
+
+
+## Plot posterior
+lines(x, dbeta(x, k + 1, n - k + 1), lty = 3, lwd = 3, col = "red")
+lines(x, dbeta(x, kl + 1, n - kl + 1), lty = 3, lwd = 3, col = "black")
+
+legend("topright", c("Prior", "Training-Naïve","Training-Logistic", "Test-Naïve","Test-Logistic","Posterior-Naïve","Posterior-Logistic"),  lty = c(3, 1, 1,3,3,3,3), lwd = 3, col = c("blue", "green", "pink","yellow","grey","red","black"))
+
+## Specificity
+### Training Sample - 
+kp = 187 #Naive
+np = 201 # total
+klp = 194 # Logistic
+
+kpriori = 10 #Naive
+npriori = 49 # total
+
+### Test Sample
+k = 69+kp #Naive
+n = 73+np # total
+kl = 72+klp # Logistic
+
+## x-axis for plotting
+numSteps = 200
+x = seq(0, 1, 1 / numSteps)
+
+## Likelihood (training) function
+P = x^kp * (1 - x)^(np - kp)
+Pl = x^klp * (1 - x)^(np - klp)
+
+## Likelihood function (test sample)
+L = x^k * (1 - x)^(n - k)
+Ll = x^kl * (1 - x)^(n - kl)
+
+## Normalization
+L = L / sum(L) * numSteps
+Ll = Ll / sum(Ll) * numSteps
+P = P / sum(P) * numSteps
+Pl = Pl / sum(Pl) * numSteps
+
+## Plot prior sensitivity = prevalence = 0.2
+plot(x, dbeta(x,40,2), type="l",lty = 3, lwd = 3, col = "blue",ylim = c(0,40), xlim=c(0.8,1),
+     main = "Specificity calibration for each model",
+     xlab = expression(theta), ylab = "probability density function")
+
+## Plot Training
+lines(x, P, type="l",lty = 1, lwd = 3, col = "green")
+lines(x, Pl, type="l",lty = 1, lwd = 3, col = "pink")
+
+## Plot Likelihood
+
+lines(x, L, type = 'l', lwd = 3,col="yellow")
+lines(x, Ll, type = 'l', lwd = 3,col="grey")
+
+
+## Plot posterior
+lines(x, dbeta(x, k + 1, n - k + 1), lty = 3, lwd = 3, col = "red")
+lines(x, dbeta(x, kl + 1, n - kl + 1), lty = 3, lwd = 3, col = "black")
+
+legend("topleft", c("Prior", "Training-Naïve","Training-Logistic", "Test-Naïve","Test-Logistic","Posterior-Naïve","Posterior-Logistic"),  lty = c(3, 1, 1,3,3,3,3), lwd = 3, col = c("blue", "green", "pink","yellow","grey","red","black"))
+
+
+```
+
+
+# Cost function
+
+Using a classifier makes no sense without considering the cost function of each prediction error. The default cost function is false positive equals false negative. For this reason, we implemented all the algorithms in an android app where fp/fn cost is an essencial parameter.
+
